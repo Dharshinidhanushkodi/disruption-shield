@@ -2,6 +2,7 @@
 DisruptionShield - FastAPI Backend
 Serves the HTML dashboard and handles API calls
 """
+import os
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -43,9 +44,41 @@ coordinator = CoordinatorAgent()
 shield_active = False # Global shield state
 
 
-@app.on_event("startup")
-async def startup():
-    await init_db()
+# Lazy DB initialization flag
+db_initialized = False
+
+async def ensure_db():
+    """Ensures database is initialized before processing any request."""
+    global db_initialized
+    if not db_initialized:
+        print("Lazy-initializing database...")
+        try:
+            await init_db()
+            db_initialized = True
+            print("Database initialized successfully.")
+        except Exception as e:
+            print(f"FAILED to initialize database: {e}")
+            raise
+
+@app.get("/api/health")
+async def health_check():
+    """Endpoint for monitoring and testing deployment."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "db_initialized": db_initialized,
+        "vercel": os.getenv("VERCEL") == "1"
+    }
+
+@app.middleware("http")
+async def db_session_middleware(request, call_next):
+    """Ensure DB is ready before any API call."""
+    if request.url.path.startswith("/api"):
+        await ensure_db()
+    response = await call_next(request)
+    return response
+
+# Removed @app.on_event("startup") to prevent startup timeouts
 
 
 @app.get("/", response_class=HTMLResponse)

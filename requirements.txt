@@ -2,7 +2,7 @@
 # Install with: pip install -r requirements.txt
 
 # Core Framework
-chainlit==1.3.2
+# chainlit==1.3.2 (Removed for Vercel optimization, install locally if needed)
 fastapi==0.115.6
 uvicorn[standard]==0.25.0
 

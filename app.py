@@ -11,7 +11,21 @@ import json
 import traceback
 from datetime import datetime, timedelta
 
-import chainlit as cl
+try:
+    import chainlit as cl
+except ImportError:
+    # Fallback for Vercel where chainlit is not installed
+    class cl:
+        def on_chat_start(func): return func
+        def on_message(func): return func
+        class Message:
+            def __init__(self, **kwargs): pass
+            async def send(self): pass
+        class user_session:
+            @staticmethod
+            def set(k, v): pass
+            @staticmethod
+            def get(k): return None
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import init_db, AsyncSessionLocal
