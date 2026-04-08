@@ -25,3 +25,5 @@ python-dateutil==2.9.0
 
 # Async support
 anyio==4.7.0
+
+google-generativeai
