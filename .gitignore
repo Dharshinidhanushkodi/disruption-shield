@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+env/
+dist/
+
+# Configuration and Secrets
+.env
+
+# Database
+*.db
+*.sqlite3
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+*.log
+error.txt
+output.txt
+startup_error.txt
+
+# Editor / System files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

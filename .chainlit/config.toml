@@ -1,0 +1,36 @@
+[project]
+enable_telemetry = false
+
+[features]
+prompt_playground = false
+multi_modal = true
+unsafe_allow_html = true
+latex = false
+
+[features.audio]
+enabled = false
+
+[UI]
+name = "DisruptionShield Coordinator"
+description = "AI-powered Multi-Agent Disruption Recovery System"
+default_collapse_content = false
+hide_cot = false
+favicon = "/public/favicon.svg"
+
+[UI.theme]
+font_family = "Inter, 'Segoe UI', system-ui, sans-serif"
+default = "dark"
+
+    [UI.theme.dark]
+    background = "#0a0f1e"
+    paper = "#0d1530"
+
+    primary = "#e63946"
+    primary_hover = "#c1121f"
+
+    secondary = "#1a2744"
+    text_primary = "#e8eaf6"
+    text_secondary = "#8892b0"
+
+[meta]
+generated_by = "DisruptionShield Coordinator v1.0"
