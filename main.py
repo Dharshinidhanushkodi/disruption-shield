@@ -1,6 +1,6 @@
 """
-DisruptionShield - FastAPI Backend (Bulletproof Serverless Entry)
-Uses late-imports to ensure zero startup crashes and clear error reporting.
+DisruptionShield - FastAPI Backend (Production Build)
+Serves the compiled React 'dist' folder for maximum performance and stability.
 """
 import os
 import sys
@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI, Depends, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 # ─── Foundation ────────────────────────────────────────────────────────────
 
@@ -30,17 +31,26 @@ app.add_middleware(
 # Shared state
 db_initialized = False
 
-# ─── Defensive Mounting ─────────────────────────────────────────────────────
+# ─── Production Asset Mounting ──────────────────────────────────────────────
 
-frontend_path = root_path / "frontend"
+# We prioritize 'frontend/dist' for production.
+dist_path = root_path / "frontend" / "dist"
+src_path = root_path / "frontend"
+
 try:
-    if frontend_path.exists():
-        from fastapi.staticfiles import StaticFiles
-        # We mount these safely. If they fail, the app still boots.
-        if (frontend_path / "src").exists():
-            app.mount("/src", StaticFiles(directory=frontend_path / "src"), name="src")
-        if (frontend_path / "public").exists():
-            app.mount("/public", StaticFiles(directory=frontend_path / "public"), name="public")
+    if dist_path.exists():
+        print("Production build detected. Serving from /dist")
+        # Mount the assets folder
+        if (dist_path / "assets").exists():
+            app.mount("/assets", StaticFiles(directory=dist_path / "assets"), name="assets")
+        # Serve icons and other root assets
+        app.mount("/static", StaticFiles(directory=dist_path), name="static")
+    else:
+        print("No dist found. Falling back to /src (Development mode)")
+        if (src_path / "src").exists():
+            app.mount("/src", StaticFiles(directory=src_path / "src"), name="src")
+        if (src_path / "public").exists():
+            app.mount("/public", StaticFiles(directory=src_path / "public"), name="public")
 except Exception as e:
     print(f"Non-critical: Static mount failed: {e}")
 
@@ -50,7 +60,6 @@ except Exception as e:
 async def diagnostic_middleware(request, call_next):
     """Global error catcher that displays tracebacks in UI."""
     try:
-        # Move DB init here to catch its errors too
         if request.url.path.startswith("/api"):
             global db_initialized
             if not db_initialized:
@@ -63,12 +72,12 @@ async def diagnostic_middleware(request, call_next):
         print(f"CRITICAL RUNTIME ERROR:\n{error_info}")
         return HTMLResponse(
             content=f"""
-            <html>
-                <body style="font-family: sans-serif; padding: 2rem; background: #0f172a; color: #f8fafc;">
+            <html style="background: #0f172a; color: #f8fafc; font-family: sans-serif;">
+                <body style="padding: 2rem;">
                     <h1 style="color: #ef4444;">DisruptionShield: Internal Diagnostics</h1>
-                    <p>The server is running but encountered a runtime failure.</p>
-                    <div style="background: #1e293b; padding: 1.5rem; border-radius: 0.5rem; overflow: auto; border: 1px solid #334155;">
-                        <pre style="color: #fda4af; margin: 0; font-family: monospace; white-space: pre-wrap;">{error_info}</pre>
+                    <p>The server encountered a runtime failure.</p>
+                    <div style="background: #1e293b; padding: 1.5rem; border-radius: 0.5rem; border: 1px solid #334155;">
+                        <pre style="color: #fda4af; font-family: monospace;">{error_info}</pre>
                     </div>
                 </body>
             </html>
@@ -81,47 +90,50 @@ async def diagnostic_middleware(request, call_next):
 @app.get("/")
 @app.get("/api")
 async def dashboard():
-    """Main dashboard entry point."""
-    html_path = frontend_path / "index.html"
+    """Main dashboard entry point. Favors production dist/index.html."""
+    html_path = dist_path / "index.html"
+    if not html_path.exists():
+        html_path = src_path / "index.html"
+        
     if not html_path.exists():
         return HTMLResponse(content="<h1>Setup Error</h1><p>index.html not found.</p>", status_code=500)
+    
     return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "db": db_initialized}
+    return {"status": "ok", "db": db_initialized, "mode": "production" if dist_path.exists() else "dev"}
+
+# ─── Logic Overrides (Late Imports) ─────────────────────────────────────────
 
 @app.post("/api/chat")
 async def chat(data: dict = Body(...)):
-    # Late-import heavy agents to avoid startup crashes
     from agents.llm_client import call_llm
     from database import AsyncSessionLocal
-    from tools.db_tools import tool_get_all_tasks, tool_get_todays_events, tool_get_disruption_history
+    from tools.db_tools import tool_get_all_tasks
     
     agent = data.get("agent", "Coordinator")
     message = data.get("message", "")
     
     async with AsyncSessionLocal() as session:
         t_res = await tool_get_all_tasks(session)
-        e_res = await tool_get_todays_events(session)
-        
-        prompt = f"User: {message}\nContext: {len(t_res.get('tasks', []))} tasks active."
+        num_tasks = len(t_res.get('tasks', []))
+        prompt = f"User: {message}\nContext: {num_tasks} tasks available."
         try:
-            response = await call_llm(prompt=prompt, system_prompt=f"You are {agent}.")
+            response = await call_llm(prompt=prompt, system_prompt=f"You are the {agent}.")
             return {"message": response}
         except Exception:
-            return {"message": f"Processing request with {agent}..."}
+            return {"message": f"Thinking... (Coordinator is active)"}
 
 @app.post("/api/recover")
 async def recover(data: dict = Body(...)):
-    # Late-import model logic
     from database import AsyncSessionLocal
     from sqlalchemy import select
     from models.task_model import Task
     from models.disruption_log import DisruptionLog
 
     message = data.get("message", "").lower()
-    shift = 30 # Default
+    shift = 30
     
     async with AsyncSessionLocal() as session:
         stmt = select(Task).order_by(Task.start_time)
@@ -129,16 +141,12 @@ async def recover(data: dict = Body(...)):
         tasks = res.scalars().all()
         
         for task in tasks:
-            # Simple shift recovery
             old_start = task.start_time
             if not task.original_start_time: task.original_start_time = old_start
-            
             s_dt = datetime.strptime(task.start_time, "%H:%M") + timedelta(minutes=shift)
             task.start_time = s_dt.strftime("%H:%M")
             task.status = "rescheduled"
-            
-            log = DisruptionLog(title=task.title, old_start=old_start, new_start=task.start_time, reason=message)
-            session.add(log)
+            session.add(DisruptionLog(title=task.title, old_start=old_start, new_start=task.start_time, reason=message))
             
         await session.commit()
         return {"msg": "rescheduled"}
