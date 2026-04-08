@@ -85,8 +85,12 @@ async def db_session_middleware(request, call_next):
 
 
 @app.get("/", response_class=HTMLResponse)
+@app.get("/api", response_class=HTMLResponse)
 async def dashboard():
+    """Main dashboard entry point. Handles root and /api prefixes for Vercel."""
     html_path = frontend_path / "index.html"
+    if not html_path.exists():
+        return HTMLResponse(content=f"<h1>Setup Error</h1><p>index.html not found. Path: {html_path}</p>", status_code=500)
     return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
 
 
