@@ -1,14 +1,9 @@
 {
   "version": 2,
-  "functions": {
-    "dashboard_server.py": {
-      "includeFiles": "frontend/**,models/**,agents/**,tools/**,database.py,config.py"
-    }
-  },
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "dashboard_server.py"
+      "destination": "/api/index.py"
     }
   ]
 }
