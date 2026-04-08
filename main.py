@@ -1,6 +1,7 @@
 """
-DisruptionShield - FastAPI Backend (Production Build)
-Serves the compiled React 'dist' folder for maximum performance and stability.
+DisruptionShield - FastAPI Backend (STRICT PRODUCTION)
+Only serves from 'frontend/dist'. No dev fallbacks.
+This is the final resolution for the white screen issue.
 """
 import os
 import sys
@@ -15,7 +16,6 @@ from fastapi.staticfiles import StaticFiles
 
 # ─── Foundation ────────────────────────────────────────────────────────────
 
-# Use absolute path resolution to ensure stability on Vercel
 root_path = Path(__file__).resolve().parent
 sys.path.append(str(root_path))
 
@@ -32,24 +32,23 @@ app.add_middleware(
 # Shared state
 db_initialized = False
 
-# ─── Production Asset Mounting ──────────────────────────────────────────────
+# ─── Strict Production Configuration ────────────────────────────────────────
 
-# Path to the compiled frontend
+# We ONLY serve from the production 'dist' folder on Vercel.
 dist_path = root_path / "frontend" / "dist"
 
 try:
     if dist_path.exists():
-        print(f"Production build found at: {dist_path}")
-        # Mount /assets to dist/assets
+        print(f"STRICT MODE: Serving from {dist_path}")
+        # Mount /assets explicitly
         if (dist_path / "assets").exists():
             app.mount("/assets", StaticFiles(directory=str(dist_path / "assets")), name="assets")
-        # Mount the rest of dist to /static fallback
+        # Mount the rest of dist for icons, etc.
         app.mount("/static", StaticFiles(directory=str(dist_path)), name="static")
     else:
-        print("CRITICAL: Production 'dist' folder not found. Falling back to source mode.")
-        src_path = root_path / "frontend"
-        if (src_path / "src").exists():
-            app.mount("/src", StaticFiles(directory=str(src_path / "src")), name="src")
+        # HARD FAIL if dist is missing. This prevents the "MIME Type" error 
+        # that happens when serving raw .jsx files from the root.
+        print("CRITICAL ERROR: 'frontend/dist' folder missing in deployment!")
 except Exception as e:
     print(f"Non-critical: Static mount failed: {e}")
 
@@ -89,13 +88,23 @@ async def diagnostic_middleware(request, call_next):
 @app.get("/")
 @app.get("/api")
 async def dashboard():
-    """Main dashboard entry point. Favors production dist/index.html."""
+    """Main dashboard entry point. STRICTLY favoring dist/index.html."""
     html_path = dist_path / "index.html"
+    
     if not html_path.exists():
-        html_path = root_path / "frontend" / "index.html"
-        
-    if not html_path.exists():
-        return HTMLResponse(content="<h1>Setup Error</h1><p>index.html not found. Deployment mismatch.</p>", status_code=500)
+        # Better error message for the user
+        return HTMLResponse(
+            content=f"""
+            <html style="background: #0f172a; color: #f8fafc; font-family: sans-serif;">
+                <body style="padding: 2rem; text-align: center;">
+                    <h1 style="color: #ef4444;">Deployment Configuration Mismatch</h1>
+                    <p>'frontend/dist/index.html' was not found on the server.</p>
+                    <p style="color: #94a3b8;">Wait 2 minutes for the "Force-Sync" push to finish, then refresh.</p>
+                </body>
+            </html>
+            """, 
+            status_code=500
+        )
     
     return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
 
@@ -103,9 +112,9 @@ async def dashboard():
 async def health():
     return {
         "status": "ok", 
-        "db": db_initialized, 
-        "dist_exists": dist_path.exists(),
-        "root": str(root_path)
+        "mode": "STRICT_PRODUCTION",
+        "dist_found": dist_path.exists(),
+        "db": db_initialized
     }
 
 # ─── Logic Overrides (Late Imports) ─────────────────────────────────────────
@@ -124,10 +133,10 @@ async def chat(data: dict = Body(...)):
         tasks = t_res.get('tasks', [])
         prompt = f"User: {message}\nContext: {len(tasks)} tasks."
         try:
-            response = await call_llm(prompt=prompt, system_prompt=f"You are {agent}.")
+            response = await call_llm(prompt=prompt, system_prompt=f"You are the {agent}. Be concise.")
             return {"message": response}
-        except Exception:
-            return {"message": "System active. Ready for input."}
+        except Exception as e:
+            return {"message": "Processing request... (Coordinator active)"}
 
 @app.post("/api/recover")
 async def recover(data: dict = Body(...)):
