@@ -19,11 +19,12 @@ DisruptionShield is a hackathon-winning productivity assistant designed to handl
 
 ## 🛠️ Tech Stack
 
--   **Backend:** FastAPI (Python 3.10+)
--   **UI:** Chainlit (Modern, conversational interface)
+-   **Backend:** FastAPI (Python 3.12+)
+-   **UI:** Chainlit (Local conversational interface) / React Dashboard (Web)
 -   **Database:** SQLite + SQLAlchemy 2.0 (Async)
--   **LLM:** Groq (Llama-3.3-70b) or OpenAI (GPT-4o)
--   **Styling:** Custom CSS with Deep Navy + Alert Red theme
+-   **LLM:** **Google Gemini** (Gemini-2.0-Flash)
+-   **Styling:** Vanilla CSS with Deep Navy + Neon Alert theme
+-   **Deployment:** **Vercel** (Serverless optimization)
 
 ---
 
@@ -42,20 +43,32 @@ DisruptionShield is a hackathon-winning productivity assistant designed to handl
 
 3. **Configure environment:**
    - Copy `.env.example` to `.env`.
-   - Add your `GROQ_API_KEY`.
+   - Add your `GEMINI_API_KEY`.
 
 4. **Launch the Core Assistant (Chainlit):**
+   *Note: Ensure `chainlit` is installed locally.*
    ```bash
    chainlit run app.py
    ```
 
 5. **Launch the Dashboard (FastAPI):**
    ```bash
-   python main.py
-   # OR
    python dashboard_server.py
    ```
    *The dashboard will be available at `http://localhost:8001`.*
+
+---
+
+## 🌐 Cloud Deployment (Vercel)
+
+DisruptionShield is optimized for **Vercel Serverless Functions**.
+
+1. **Connect to GitHub**: Push your repo to GitHub.
+2. **Import to Vercel**: Create a new project from your repo.
+3. **Set Environment Variables**:
+   - `GEMINI_API_KEY`: Your Google AI Studio key.
+   - `LLM_PROVIDER`: `gemini`
+4. **Data Persistence**: Note that on Vercel, the app uses `/tmp` for SQLite. This is suitable for demos; for production, connect a persistent `DATABASE_URL` (Postgres, Neon, etc.).
 
 ---
 
@@ -81,17 +94,16 @@ DisruptionShield is a hackathon-winning productivity assistant designed to handl
 ## 📁 Folder Structure
 
 ```text
-disruption-shield/
-├── .chainlit/          # UI Config
-├── agents/             # Coordinator + Specialists
+├── agents/             # Coordinator + Specialists (Gemini powered)
 ├── models/             # SQLAlchemy 2.0 ORM Models
+├── frontend/           # Dashboard HTML & React source
 ├── public/             # Custom CSS & Assets
 ├── tools/              # DB Tools (MCP-style)
-├── app.py              # Main Chainlit App
-├── main.py             # FastAPI Backend
-├── config.py           # Configuration
-├── database.py         # SQLAlchemy Engine
-└── requirements.txt    # Dependencies
+├── app.py              # Local Chainlit App (Conversational)
+├── dashboard_server.py # FastAPI Backend (Dashboard + API)
+├── vercel.json         # Vercel Serverless Config
+├── .python-version     # Python 3.12 Lock
+└── requirements.txt    # Optimized Dependencies
 ```
 
 ---
