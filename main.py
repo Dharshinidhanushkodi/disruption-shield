@@ -1,18 +1,36 @@
+"""
+DisruptionShield - FastAPI Backend (Vercel-Optimized Entry Point)
+Handles dashboard serving and API orchestration with lazy-loading agents.
+"""
+import os
+import sys
+import json
+from datetime import datetime, timedelta
+from pathlib import Path
 from fastapi import FastAPI, Depends, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.future import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime, timedelta, time
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Optional
 
-from database import init_db, get_session
-from models.task_model import Task
-from models.disruption_log import DisruptionLog as History
+# Correct path logic for root-level entry
+root_path = Path(__file__).parent
+sys.path.append(str(root_path))
 
-app = FastAPI()
+from database import init_db, AsyncSessionLocal
+from agents.coordinator import CoordinatorAgent
+from agents.llm_client import call_llm
+from tools.db_tools import (
+    tool_add_task, tool_get_all_tasks,
+    tool_add_event, tool_get_todays_events,
+    tool_get_disruption_history,
+    tool_analyze_disruption_patterns,
+    tool_get_recovery_plans,
+    tool_log_disruption,
+)
 
-# FIX CORS
+app = FastAPI(title="DisruptionShield Coordinator")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,152 +39,211 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Startup
-@app.on_event("startup")
-async def on_startup():
-    await init_db()
+# Serve the frontend directory statically
+frontend_path = root_path / "frontend"
+if frontend_path.exists():
+    app.mount("/src", StaticFiles(directory=frontend_path / "src"), name="src")
+    app.mount("/public", StaticFiles(directory=frontend_path / "public"), name="public")
 
-# Pydantic models for validation
+# ─── Lazy Initialization ───────────────────────────────────────────────────
+
+_coordinator = None
+db_initialized = False
+
+async def get_coordinator():
+    """Lazy-loads the CoordinatorAgent to prevent startup timeouts."""
+    global _coordinator
+    if _coordinator is None:
+        print("Lazy-loading CoordinatorAgent...")
+        _coordinator = CoordinatorAgent()
+    return _coordinator
+
+async def ensure_db():
+    """Ensures database is initialized before processing any request."""
+    global db_initialized
+    if not db_initialized:
+        print("Lazy-initializing database...")
+        try:
+            await init_db()
+            db_initialized = True
+            print("Database initialized successfully.")
+        except Exception as e:
+            print(f"FAILED to initialize database: {e}")
+            raise
+
+@app.middleware("http")
+async def db_session_middleware(request, call_next):
+    """Ensure DB is ready before any API call."""
+    if request.url.path.startswith("/api"):
+        await ensure_db()
+    response = await call_next(request)
+    return response
+
+# ─── Health & Dashboard ─────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def health_check():
+    """Endpoint for monitoring and testing deployment."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "db_initialized": db_initialized,
+        "vercel": os.getenv("VERCEL") == "1"
+    }
+
+@app.get("/", response_class=HTMLResponse)
+@app.get("/api", response_class=HTMLResponse)
+async def dashboard():
+    """Main dashboard entry point."""
+    html_path = frontend_path / "index.html"
+    if not html_path.exists():
+        return HTMLResponse(content=f"<h1>Setup Error</h1><p>index.html not found. Path: {html_path}</p>", status_code=500)
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+
+# ─── Models ────────────────────────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    message: str
+    agent: str = "Coordinator"
+
 class TaskCreate(BaseModel):
     title: str
     start_time: str
-    end_time: str
+    end_time: str = None
 
 class RecoverRequest(BaseModel):
     message: str
 
-# APIs
-@app.get("/api/tasks")
-async def get_tasks(session: AsyncSession = Depends(get_session)):
-    result = await session.execute(select(Task).order_by(Task.start_time))
-    tasks = result.scalars().all()
-    return [t.to_dict() for t in tasks]
+class ShieldToggle(BaseModel):
+    active: bool
 
-@app.post("/api/tasks")
-async def add_task(req: TaskCreate, session: AsyncSession = Depends(get_session)):
-    try:
-        # User is sending "HH:MM". We store it directly as String.
-        # We also calculate end_time as start_time + 1 hour.
-        start_dt = datetime.strptime(req.start_time, "%H:%M")
-        end_dt = start_dt + timedelta(hours=1)
-        
-        task = Task(
-            title=req.title,
-            start_time=req.start_time,
-            end_time=end_dt.strftime("%H:%M"),
-            status="Pending"
+# ─── API Endpoints ─────────────────────────────────────────────────────────
+
+@app.post("/api/chat")
+async def chat(req: ChatRequest):
+    async with AsyncSessionLocal() as session:
+        tasks_result   = await tool_get_all_tasks(session, status_filter="Pending")
+        events_result  = await tool_get_todays_events(session)
+        history_result = await tool_get_disruption_history(session, limit=5)
+
+        tasks   = tasks_result.get("tasks", [])[:5]
+        events  = events_result.get("events", [])
+        history = history_result.get("disruption_logs", [])[:3]
+
+        context = (
+            f"Pending tasks: {json.dumps([t['title'] for t in tasks])}\n"
+            f"Today's events: {json.dumps([e['title'] for e in events])}\n"
+            f"Recent disruptions: {json.dumps([d['disruption_type'] for d in history])}\n"
+            f"Current time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n"
+            f"Active agent: {req.agent}"
         )
-        session.add(task)
-        await session.commit()
-        await session.refresh(task)
-        return task.to_dict()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/api/history")
-async def get_history(session: AsyncSession = Depends(get_session)):
-    result = await session.execute(select(History).order_by(History.timestamp.desc()))
-    logs = result.scalars().all()
-    return [log.to_dict() for log in logs]
+        prompt = (
+            f"{context}\n\nUser: {req.message}\n\n"
+            "Respond naturally and helpfully. Max 3 sentences."
+        )
+
+        try:
+            response = await call_llm(
+                prompt=prompt,
+                system_prompt=(
+                    f"You are the {req.agent} of DisruptionShield. Be warm, helpful, and concise."
+                ),
+                max_tokens=300,
+            )
+            return {"message": response}
+        except Exception as e:
+            return {"message": f"Processing your request with {req.agent}..."}
 
 @app.post("/api/recover")
-async def recover(data: dict, session: AsyncSession = Depends(get_session)):
-    print("Incoming:", data)
+async def recover(req: RecoverRequest):
+    """Cascading recovery logic."""
+    from sqlalchemy import select
+    from models.task_model import Task
+    from models.disruption_log import DisruptionLog
 
-    reason = data.get("message", "").lower()
-
-    # 🔹 shift minutes
-    shift_map = {
-        "traffic": 30,
-        "power": 60,
-        "meeting": 45,
-        "emergency": 90
-    }
-
+    message = req.message.lower()
     shift = 0
-    for key in shift_map:
-        if key in reason:
-            shift = shift_map[key]
+    if "traffic" in message: shift = 30
+    elif "power" in message: shift = 60
+    elif "emergency" in message: shift = 90
+    elif "meeting" in message: shift = 45
 
-    print("Reason:", reason)
-    print("Shift:", shift)
+    if shift == 0: return {"msg": "no disruption"}
 
-    if shift == 0:
-        return {"message": "No disruption detected"}
-
-    # 🔹 current time
-    now_time = datetime.strptime(datetime.now().strftime("%H:%M"), "%H:%M")
-    print(f"DEBUG: Processing disruption shift (+{shift} mins)")
-
-    result = await session.execute(select(Task).order_by(Task.start_time))
-    tasks = result.scalars().all()
-    print(f"DEBUG: Found {len(tasks)} tasks to evaluate.")
-
-    prev_end_dt = None
-
-    for i, task in enumerate(tasks):
-        task_start_dt = datetime.strptime(task.start_time, "%H:%M")
-        task_end_dt = datetime.strptime(task.end_time, "%H:%M")
+    async with AsyncSessionLocal() as session:
+        stmt = select(Task).order_by(Task.start_time)
+        result = await session.execute(stmt)
+        tasks = result.scalars().all()
         
-        old_start = task.start_time
-        old_end = task.end_time
+        now = datetime.now().strftime("%H:%M")
+        prev_end = None
 
-        # 🔥 APPLY SHIFT TO ALL ELIGIBLE TASKS
-        # We process ALL tasks found for maximum visibility during testing
-        task_start_dt += timedelta(minutes=shift)
-        task_end_dt += timedelta(minutes=shift)
+        for task in tasks:
+            if task.start_time < now: continue
 
-        # 🔥 CASCADE PROTECTION
-        # If the task now overlaps with the previous one, push it further
-        if prev_end_dt and task_start_dt < prev_end_dt:
-            print(f"DEBUG: Cascading push for '{task.title}' to avoid overlap with previous task.")
-            duration = task_end_dt - task_start_dt
-            task_start_dt = prev_end_dt
-            task_end_dt = task_start_dt + duration
+            old_start = task.start_time
+            start_dt = datetime.strptime(task.start_time, "%H:%M")
 
-        print(f"DEBUG: Rescheduling '{task.title}': {old_start} -> {task_start_dt.strftime('%H:%M')}")
+            if prev_end is None:
+                new_start = start_dt + timedelta(minutes=shift)
+            else:
+                prev_dt = datetime.strptime(prev_end, "%H:%M")
+                new_start = max(start_dt + timedelta(minutes=shift), prev_dt)
 
-        # save original only once
-        if not task.original_start_time:
-            task.original_start_time = old_start
-            task.original_end_time = old_end
+            new_end = new_start + timedelta(hours=1)
+            if not task.original_start_time: task.original_start_time = old_start
 
-        # update
-        task.start_time = task_start_dt.strftime("%H:%M")
-        task.end_time = task_end_dt.strftime("%H:%M")
-        task.status = "rescheduled"
+            task.start_time = new_start.strftime("%H:%M")
+            task.end_time = new_end.strftime("%H:%M")
+            task.status = "rescheduled"
+            prev_end = task.end_time
 
-        prev_end_dt = task_end_dt
+            log = DisruptionLog(
+                title=task.title,
+                old_start=old_start,
+                new_start=task.start_time,
+                reason=message,
+                disruption_type=message.split()[0] if message else "disruption"
+            )
+            session.add(log)
+        
+        await session.commit()
+        return {"msg": "rescheduled"}
 
-        # history
-        history = History(
-            title=task.title,
-            old_start=old_start,
-            new_start=task.start_time,
-            reason=reason
-        )
-        session.add(history)
+@app.get("/api/tasks")
+async def get_tasks():
+    async with AsyncSessionLocal() as session:
+        result = await tool_get_all_tasks(session)
+        return result.get("tasks", [])
 
-    await session.commit()
-    print("DEBUG: All tasks rescheduled and committed.")
+@app.post("/api/tasks")
+async def add_task(req: TaskCreate):
+    async with AsyncSessionLocal() as session:
+        result = await tool_add_task(session, **req.dict())
+        return result
 
-    return {"message": "Rescheduled successfully"}
+@app.get("/api/history")
+async def get_history():
+    async with AsyncSessionLocal() as session:
+        result = await tool_get_disruption_history(session, limit=20)
+        return result.get("disruption_logs", [])
 
+@app.post("/api/seed")
+async def seed():
+    async with AsyncSessionLocal() as session:
+        demo_tasks = [
+            {"title": "Submit Q1 financial report", "start_time": "09:00", "end_time": "11:00"},
+            {"title": "Review client contract draft", "start_time": "11:30", "end_time": "12:30"},
+        ]
+        for t in demo_tasks: await tool_add_task(session, **t)
+    return {"status": "ok", "message": "Demo data loaded!"}
 
-@app.post("/api/undo")
-async def undo(session: AsyncSession = Depends(get_session)):
-    stmt = select(Task).where(Task.status == "rescheduled")
-    result = await session.execute(stmt)
-    rescheduled_tasks = result.scalars().all()
-    
-    for task in rescheduled_tasks:
-        if task.original_start_time:
-            task.start_time = task.original_start_time
-        task.status = "Pending"
-    
-    await session.commit()
-    return {"status": "ok"}
+@app.get("/{path:path}")
+async def catch_all(path: str):
+    """Diagnostic route."""
+    return {"error": "Path Not Found", "path": f"/{path}"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
