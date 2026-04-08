@@ -52,18 +52,54 @@ try:
 except Exception as e:
     print(f"Non-critical: Static mount failed: {e}")
 
-# ─── Diagnostic Middleware ──────────────────────────────────────────────────
+# ─── Startup & Diagnostic Middleware ────────────────────────────────────────
+
+@app.on_event("startup")
+async def startup_event():
+    global db_initialized
+    if not db_initialized:
+        print("Initializing database on startup...")
+        try:
+            from database import init_db
+            await init_db()
+            
+            from database import AsyncSessionLocal
+            from sqlalchemy import select, func
+            from models.task_model import Task
+            from models.disruption_log import DisruptionLog
+            
+            async with AsyncSessionLocal() as session:
+                res_tasks = await session.execute(select(func.count(Task.id)))
+                if res_tasks.scalar() == 0:
+                    now = datetime.now()
+                    t1_start = now.replace(hour=10, minute=0, second=0).isoformat()
+                    t1_end = now.replace(hour=11, minute=0, second=0).isoformat()
+                    session.add(Task(title="Morning Meeting", start_time=t1_start, end_time=t1_end, priority=5, energy_level="High", impact_score=5))
+                    
+                    t2_start = now.replace(hour=12, minute=0, second=0).isoformat()
+                    t2_end = now.replace(hour=14, minute=0, second=0).isoformat()
+                    session.add(Task(title="Project Work", start_time=t2_start, end_time=t2_end, priority=3, energy_level="Medium", impact_score=3))
+                    
+                    t3_start = now.replace(hour=15, minute=0, second=0).isoformat()
+                    t3_end = now.replace(hour=16, minute=30, second=0).isoformat()
+                    session.add(Task(title="Report Submission", start_time=t3_start, end_time=t3_end, priority=5, energy_level="High", impact_score=5))
+                
+                res_logs = await session.execute(select(func.count(DisruptionLog.id)))
+                if res_logs.scalar() == 0:
+                    iso_now = datetime.now().isoformat()
+                    session.add(DisruptionLog(title="System initialized", old_start=iso_now, new_start=iso_now, reason="Startup Sequence Complete"))
+                
+                await session.commit()
+            
+            db_initialized = True
+            print("Database initialized and sealed.")
+        except Exception as e:
+            print("DB Initialization safe failure:", e)
 
 @app.middleware("http")
 async def diagnostic_middleware(request, call_next):
     """Global error catcher that displays tracebacks in UI."""
     try:
-        if request.url.path.startswith("/api"):
-            global db_initialized
-            if not db_initialized:
-                from database import init_db
-                await init_db()
-                db_initialized = True
         return await call_next(request)
     except Exception as e:
         error_info = traceback.format_exc()
@@ -160,8 +196,17 @@ async def recover(data: dict = Body(...)):
         for task in tasks:
             old_start = task.start_time
             if not task.original_start_time: task.original_start_time = old_start
-            s_dt = datetime.strptime(task.start_time, "%H:%M") + timedelta(minutes=shift)
-            task.start_time = s_dt.strftime("%H:%M")
+            try:
+                s_dt = datetime.strptime(task.start_time, "%H:%M") + timedelta(minutes=shift)
+                task.start_time = s_dt.strftime("%H:%M")
+            except ValueError:
+                # Handle ISO formatting securely
+                if "T" in task.start_time:
+                    s_dt = datetime.fromisoformat(task.start_time) + timedelta(minutes=shift)
+                    task.start_time = s_dt.isoformat()
+                else:
+                    # Generic fallback handling
+                    pass
             task.status = "rescheduled"
             session.add(DisruptionLog(title=task.title, old_start=old_start, new_start=task.start_time, reason=message))
             
@@ -170,11 +215,15 @@ async def recover(data: dict = Body(...)):
 
 @app.get("/api/tasks")
 async def get_tasks():
-    from database import AsyncSessionLocal
-    from tools.db_tools import tool_get_all_tasks
-    async with AsyncSessionLocal() as session:
-        res = await tool_get_all_tasks(session)
-        return res.get("tasks", [])
+    try:
+        from database import AsyncSessionLocal
+        from tools.db_tools import tool_get_all_tasks
+        async with AsyncSessionLocal() as session:
+            res = await tool_get_all_tasks(session)
+            return res.get("tasks", [])
+    except Exception as e:
+        print("ERROR in /api/tasks:", e)
+        return []
 
 @app.post("/api/tasks")
 async def add_task(data: dict = Body(...)):
@@ -186,11 +235,15 @@ async def add_task(data: dict = Body(...)):
 
 @app.get("/api/history")
 async def get_history():
-    from database import AsyncSessionLocal
-    from tools.db_tools import tool_get_disruption_history
-    async with AsyncSessionLocal() as session:
-        result = await tool_get_disruption_history(session, limit=20)
-        return result.get("disruption_logs", [])
+    try:
+        from database import AsyncSessionLocal
+        from tools.db_tools import tool_get_disruption_history
+        async with AsyncSessionLocal() as session:
+            result = await tool_get_disruption_history(session, limit=20)
+            return result.get("disruption_logs", [])
+    except Exception as e:
+        print("ERROR in /api/history:", e)
+        return []
 
 @app.post("/api/seed")
 async def seed():
@@ -206,7 +259,33 @@ async def seed():
 
 @app.post("/api/undo")
 async def undo():
-    return {"status": "ok", "message": "Undo not fully implemented in DB."}
+    try:
+        from database import AsyncSessionLocal
+        from sqlalchemy import select, delete
+        from models.task_model import Task
+        from models.disruption_log import DisruptionLog
+        async with AsyncSessionLocal() as session:
+            stmt = select(Task).where(Task.status == "rescheduled")
+            res = await session.execute(stmt)
+            tasks = res.scalars().all()
+            for task in tasks:
+                if task.original_start_time:
+                    task.start_time = task.original_start_time
+                if getattr(task, 'original_end_time', None):
+                    task.end_time = task.original_end_time
+                task.original_start_time = None
+                if hasattr(task, 'original_end_time'):
+                    task.original_end_time = None
+                task.status = "Pending"
+            
+            stmt2 = delete(DisruptionLog).where(DisruptionLog.reason != "Startup Sequence Complete")
+            await session.execute(stmt2)
+            
+            await session.commit()
+            return {"status": "ok", "message": "Undo applied."}
+    except Exception as e:
+        print("ERROR in /api/undo:", e)
+        return {"status": "error"}
 
 @app.get("/api/shield")
 async def get_shield():
